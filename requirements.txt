@@ -1,0 +1,14 @@
+joblib
+matplotlib
+numpy
+openpyxl
+packaging
+pandas
+pywin32
+requests
+scikit-learn
+scipy
+selenium
+tensorflow
+torch
+yfinance
