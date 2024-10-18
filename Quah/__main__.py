@@ -54,6 +54,7 @@ def main():
     n_test = args.n_test
     features_pct_change = args.features_pct_change
     prev_return = args.prev_return
+    features_to_normalize = args.features_to_normalize
 
     file_paths: list[Path] = []
     for file_path in data_folder.iterdir():
@@ -70,6 +71,14 @@ def main():
                                                   features_pct_change=features_pct_change,
                                                   prev_return=prev_return,
                                                   )
+
+        # replace all the `/` in the column names with `Per` to avoid issues with the file names
+        stocks_df.columns = [col.replace('/', 'Per') for col in stocks_df.columns]
+        prices_df.columns = [col.replace('/', 'Per') for col in prices_df.columns]
+
+        features = [feature.replace('/', 'Per') for feature in features]
+        features_to_normalize = [feature.replace('/', 'Per') for feature in features_to_normalize]
+
         if stocks_csv_path:
             stocks_df.to_csv(stocks_csv_path, index=False)
         else:
@@ -85,6 +94,18 @@ def main():
     else:
         stocks_df = pd.read_csv(stocks_csv_path)
         prices_df = pd.read_csv(prices_csv_path)
+
+        # replace all the `/` in the column names with `Per` to avoid issues with the file names
+        stocks_df.columns = [col.replace('/', 'Per') for col in stocks_df.columns]
+        prices_df.columns = [col.replace('/', 'Per') for col in prices_df.columns]
+
+        features = [feature.replace('/', 'Per') for feature in features]
+        features_to_normalize = [feature.replace('/', 'Per') for feature in features_to_normalize]
+
+    if features_to_normalize:
+        stocks_df.loc[:, features_to_normalize] = stocks_df.loc[:, features_to_normalize].div(
+            stocks_df['Shares Outstanding (Basic)'], axis=0)
+        features.remove('Shares Outstanding (Basic)')   # remove the Shares Outstanding (Basic) from the features list
 
     # drop invalid ticker rows
     # all tickers in prices_df where there are -ve values in the Open or close coluns
@@ -116,11 +137,9 @@ def main():
 
     assert stocks_df.shape[0] == prices_df.shape[0]
 
-    print(
-        f'Return: min: {stocks_df['Return'].min()}, '
-        f'max: {stocks_df['Return'].max()}, '
-        f'mean: {stocks_df['Return'].mean()}, '
-        f'std: {stocks_df['Return'].std()}')
+    for col in stocks_df.columns:
+        if col != 'Ticker':
+            print(f'{col}: min: {stocks_df[col].min()}, mean: {stocks_df[col].mean()}, max: {stocks_df[col].max()}')
 
     # Ensure that the indices and ordering match between test_df and test_price_df
     assert stocks_df['Ticker'].equals(prices_df['Ticker']), "Tickers do not match between test_df and test_price_df"
@@ -231,7 +250,8 @@ def main():
         model = ANN(input_size=input_size, hidden_size=hidden_size, output_size=output_size)
         model.apply(init_weights)
 
-        criterion = nn.CrossEntropyLoss()
+        # class_weights = torch.tensor([1.0, 5.0])  # Increase weight for class 1
+        criterion = nn.CrossEntropyLoss()   # weight=class_weights
         optimizer = torch.optim.AdamW(model.parameters(), lr=0.001)
 
         # model name
@@ -263,7 +283,7 @@ def main():
         optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
         epoch = checkpoint['epoch']
         best_val_loss = checkpoint['val_loss']
-        best_val_accuracy = checkpoint['val_accuracy']
+        best_val_accuracy = checkpoint['val_f1']
     else:
         if not model_name:
             raise ValueError('Model name must be provided to load the model')
@@ -300,7 +320,7 @@ def main():
         optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
         epoch = checkpoint['epoch']
         best_val_loss = checkpoint['val_loss']
-        best_val_accuracy = checkpoint['val_accuracy']
+        best_val_accuracy = checkpoint['val_f1']
 
     model.eval()  # Set the model to evaluation mode
 
@@ -327,6 +347,7 @@ def main():
 
         print(f'Train Accuracy: {train_accuracy}, Val Accuracy: {val_accuracy}, Test Accuracy: {test_accuracy}')
 
+    print(f'Model: {model_name}')
     # plot and save the confusion matrix
     cm_path = model_figures_folder / f'{model_name}_cm.png'
     plot_confusion_matrix('All Stocks', Y_test_t.numpy(), Y_test_pred,
