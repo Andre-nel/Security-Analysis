@@ -53,4 +53,14 @@ def get_args():
     parser.add_argument("--features_pct_change", action="store_true",
                         help="Include percentage change of features as values")
     parser.add_argument("--prev_return", action="store_true", help="Include previous stock price return as a feature")
+    parser.add_argument("--features_to_normalize", nargs="+", type=str,
+                        help="Features to normalize, divide by `Shares Outstanding (Basic)`",
+                        default=[])
+    parser.add_argument("--combine_stock_data", action="store_true",
+                        help="Combine Normal and pct change data into one DataFrame")
+    parser.add_argument("--stocks_pct_change_csv_path", type=str,
+                        help="Path to load stocks pct change csv")
+    parser.add_argument("--scale", action="store_true", help="Scale the data using MinMaxScaler")
+    parser.add_argument("--max_num_stocks_buy", type=int, default=10,
+                        help="Maximum number of stocks to buy each quarter.")
     return parser.parse_args()
