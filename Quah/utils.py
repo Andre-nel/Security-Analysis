@@ -13,7 +13,7 @@ from torch import nn
 from torch.utils.data import DataLoader
 
 import seaborn as sns
-from sklearn.metrics import confusion_matrix
+from sklearn.metrics import confusion_matrix, recall_score, precision_score, f1_score
 
 from . import logger
 
@@ -135,6 +135,7 @@ def process_stock_file(file_path: Union[str, Path], features: list[str],
     stock_df.loc[:, 'Return'] = stock_df.loc[:, 'Return'].shift(-1)
     stock_df = stock_df.iloc[1:-1]
     assert stock_df.shape[0] == price_df.shape[0]
+    print(f"Processed {ticker} with {stock_df.shape[0]} samples")
     return stock_df, price_df
 
 
@@ -291,31 +292,33 @@ def split_train_val_test(stocks_df: pd.DataFrame, prices_df: pd.DataFrame,
 def batch_gd(model: nn.Module, criterion: nn.Module, optimizer: torch.optim.Optimizer,
              train_loader: DataLoader, val_loader: DataLoader,
              epochs: int = 200, print_losses: bool = True,
-             save_path: str = './models/best_multi_class_accuracy.pth') -> tuple[np.ndarray, np.ndarray]:
+             save_path: str = './models/best_f1_class_1.pth',
+             threshold: float = 0.5) -> tuple[np.ndarray, np.ndarray]:
 
     train_losses = np.zeros(epochs)
     val_losses = np.zeros(epochs)
 
-    train_accuracies = np.zeros(epochs)
-    val_accuracies = np.zeros(epochs)
+    train_f1_scores = np.zeros(epochs)
+    val_f1_scores = np.zeros(epochs)
 
-    best_val_accuracy = 0.0
+    best_val_f1 = 0.0
 
     for it in range(1, epochs + 1):
         model.train()
         t0 = datetime.now()
         train_loss = []
-        train_accuracy = []
+        all_train_targets = []
+        all_train_preds = []
         for inputs, targets in train_loader:
             # Zero the parameter gradients
             optimizer.zero_grad()
 
-            # Forward pass
+            # Skip batches with a single sample (optional)
             if inputs.shape[0] == 1:
                 continue
-            # print(inputs.shape, targets.shape)
+
+            # Forward pass
             outputs: torch.Tensor = model(inputs)
-            # print(outputs.shape)
             loss: torch.Tensor = criterion(outputs, targets)
 
             # Backward pass and optimization
@@ -325,60 +328,67 @@ def batch_gd(model: nn.Module, criterion: nn.Module, optimizer: torch.optim.Opti
             # Record batch loss
             train_loss.append(loss.item())
 
-            # Calculate accuracy
-            _, preds = torch.max(outputs, 1)
-            accuracy = torch.sum(preds == targets).item() / len(preds)
-            train_accuracy.append(accuracy)
+            # Get probabilities for class 1 using softmax
+            probabilities = nn.functional.softmax(outputs, dim=1)[:, 1]
 
-        # Compute mean train loss and accuracy for the epoch
+            # Apply threshold to get predictions
+            preds = (probabilities >= threshold).long()
+            all_train_targets.extend(targets.cpu().numpy())
+            all_train_preds.extend(preds.cpu().numpy())
+
+        # Compute mean train loss and F1 score for class 1
         train_loss = np.mean(train_loss)
         train_losses[it - 1] = train_loss
 
-        train_accuracy = np.mean(train_accuracy)
-        train_accuracies[it - 1] = train_accuracy
+        train_f1 = f1_score(all_train_targets, all_train_preds, pos_label=1, zero_division=0)
+        train_f1_scores[it - 1] = train_f1
 
         # Validation phase
         model.eval()
         val_loss = []
-        val_accuracy = []
+        all_val_targets = []
+        all_val_preds = []
         with torch.no_grad():
             for inputs, targets in val_loader:
                 outputs = model(inputs)
                 loss = criterion(outputs, targets)
                 val_loss.append(loss.item())
 
-                # Calculate accuracy
-                _, preds = torch.max(outputs, 1)
-                accuracy = torch.sum(preds == targets).item() / len(preds)
-                val_accuracy.append(accuracy)
+                # Get probabilities for class 1 using softmax
+                probabilities = nn.functional.softmax(outputs, dim=1)[:, 1]
 
-        # Compute mean val loss and accuracy for the epoch
+                # Apply threshold to get predictions
+                preds = (probabilities >= threshold).long()
+                all_val_targets.extend(targets.cpu().numpy())
+                all_val_preds.extend(preds.cpu().numpy())
+
+        # Compute mean val loss and F1 score for class 1
         val_loss = np.mean(val_loss)
         val_losses[it - 1] = val_loss
 
-        val_accuracy = np.mean(val_accuracy)
-        val_accuracies[it - 1] = val_accuracy
+        val_f1 = f1_score(all_val_targets, all_val_preds, pos_label=1, zero_division=0)
+        val_f1_scores[it - 1] = val_f1
 
-        # Check if this is the best model so far based on val loss
-        if val_accuracy > best_val_accuracy:
-            best_val_accuracy = val_accuracy
+        # Save the model if val F1 score improves
+        if val_f1 > best_val_f1:
+            best_val_f1 = val_f1
             # Save the model state dict and optimizer state dict
             torch.save({
                 'epoch': it,
                 'model_state_dict': model.state_dict(),
                 'optimizer_state_dict': optimizer.state_dict(),
                 'val_loss': val_loss,
-                'val_accuracy': val_accuracy,
+                'val_f1': val_f1,
             }, save_path)
             if print_losses:
-                print(f'Epoch {it}: New best val accuracy: {val_accuracy:.3f}. Model saved.')
+                print(f'Epoch {it}: New best val F1 score: {val_f1:.3f}. Model saved.')
 
         dt = datetime.now() - t0
         if print_losses:
             print(f'Epoch: {it}/{epochs}, '
-                        f'Train Loss: {train_loss:.3f}, Val Loss: {val_loss:.3f}, '
-                        f'Train Accuracy: {train_accuracy:.3f}, Val Accuracy: {val_accuracy:.3f}, '
-                        f'Duration: {dt}')
+                  f'Train Loss: {train_loss:.3f}, Val Loss: {val_loss:.3f}, '
+                  f'Train F1: {train_f1:.3f}, Val F1: {val_f1:.3f}, '
+                  f'Duration: {dt}')
 
     return train_losses, val_losses
 
@@ -469,9 +479,12 @@ def simulateModelsTradingStrategy(model: nn.Module,
                                   cash_balance: float = 500000,
                                   num_months_period: int = 3,
                                   apply_screening: bool = True,
-                                  screening_criteria: dict = None):
+                                  screening_criteria: dict = None,
+                                  max_num_stocks_buy: int = 10,
+                                  output_folder: Union[str, Path] = 'figures') -> tuple:
     """
-    Tests a trading strategy using a given model on provided quarterly data.
+    Tests a trading strategy using a given model on provided quarterly data, and saves plots of predicted probabilities 
+    vs actual returns for each quarter.
 
     Args:
         model (nn.Module): The trained model used for predicting stock classes.
@@ -483,10 +496,16 @@ def simulateModelsTradingStrategy(model: nn.Module,
         num_months_period (int): Number of months per period.
         apply_screening (bool): Whether to apply screening criteria.
         screening_criteria (list[tuple[str, function]]): Custom screening criteria provided by the user.
+        max_num_stocks_buy (int): Maximum number of stocks to buy.
+        output_folder (Union[str, Path]): Folder to save output plots.
 
     Returns:
         tuple: Periodic returns, cumulative returns, and final cash balance.
     """
+    output_folder = Path(output_folder)
+    if not output_folder.exists():
+        output_folder.mkdir(parents=True)
+
     # Default screening criteria if none is provided
     if screening_criteria is None and apply_screening:
         screening_criteria = [
@@ -534,7 +553,67 @@ def simulateModelsTradingStrategy(model: nn.Module,
         # Use the model to predict classes for each stock
         with torch.no_grad():
             outputs = model(X_test_q)
-            _, predicted_classes = torch.max(outputs, 1)
+
+            # Get the probabilities for each class using softmax
+            probabilities = nn.functional.softmax(outputs, dim=1)
+
+            # Extract actual returns from price data
+            actual_returns = (prices_q['Close'].values - prices_q['Open'].values) / prices_q['Open'].values
+            tickers = prices_q['Ticker'].values
+
+            # Plot predicted probabilities vs actual returns
+            plt.figure(figsize=(10, 6))
+            prob_values = probabilities[:, -1].cpu().numpy()
+
+            # Normalize the returns for the color mapping (using a color scale from red to green)
+            colors = np.where(actual_returns > 0, actual_returns, -actual_returns)  # Absolute returns for intensity
+            cmap = plt.get_cmap('RdYlGn')  # Red for negative, green for positive
+
+            scatter = plt.scatter(prob_values, actual_returns, c=actual_returns, cmap=cmap, alpha=0.6)
+            # draw a horizontal line at 0
+            plt.axhline(0, color='red', linestyle='--', linewidth=0.5)
+            # draw a vertical line at the probability threshold, ie the probability
+            # of the max_num_stocks_buy th stock
+            # sort the probabilities
+            sorted_prob_values = np.sort(prob_values)
+            # the probability of the max_num_stocks_buy th stock
+            cut_of_prob = sorted_prob_values[-max_num_stocks_buy]
+            plt.axvline(cut_of_prob, color='blue', linestyle='--', linewidth=0.5)
+            
+            plt.title(f'Predicted Probabilities vs Actual Returns, Period {period + 1}: {period_start_date} - {period_end_date.date().strftime('%Y-%m-%d')}')
+            plt.xlabel('Predicted Probability of Highest Return Class')
+            plt.ylabel('Actual Return')
+            plt.colorbar(scatter, label='Return')  # Add color bar to represent the range of returns
+            plt.grid(True)
+
+            # Annotate each point with its ticker symbol
+            for i, ticker in enumerate(tickers):
+                plt.text(prob_values[i], actual_returns[i], ticker, fontsize=8, alpha=0.7)
+
+            # Save the plot to the output folder
+            plot_filename = output_folder / f'predicted_vs_actual_period_{period + 1}.png'
+            plt.savefig(plot_filename)
+            plt.close()
+            print(f"Plot for Period {period + 1} saved to {plot_filename}")
+        # Use the model to predict classes for each stock
+        with torch.no_grad():
+            outputs = model(X_test_q)
+            # _, predicted_classes = torch.max(outputs, 1)
+
+            # chose max max_num_stocks_buy stocks to buy, the ones for which the model is most confident
+            # Get the probabilities for each class using softmax
+            probabilities = nn.functional.softmax(outputs, dim=1)
+            # Get the highest class and its probability
+            _, predicted_classes = torch.max(probabilities, 1)
+            # Get the top max_num_stocks_buy stocks with the highest probability for the highest class
+            top_indices = torch.topk(probabilities[:, -1], max_num_stocks_buy).indices
+
+            # print the top max_num_stocks_buy stocks
+            print(f"Top {max_num_stocks_buy} stocks: {prices_q.iloc[top_indices.cpu().numpy()]['Ticker'].tolist()}")
+
+            mask = torch.ones_like(predicted_classes, dtype=bool)
+            mask[top_indices] = False
+            predicted_classes[mask] = 0
 
         # Identify the highest class
         highest_class = len(bins)
@@ -571,6 +650,7 @@ def simulateModelsTradingStrategy(model: nn.Module,
                 investment_per_stock = cash_balance / num_stocks
                 date_str = prices_q['Date'].iloc[0]
                 print(f"Buying {num_stocks} stocks that passed the screening on {date_str}...")
+                print(f'Stocks: {selected_stocks["Ticker"].tolist()}')
                 
                 # raise exception if a ticker occurs more than one in the selected_stocks
                 if len(selected_stocks['Ticker'].unique()) != len(selected_stocks):
