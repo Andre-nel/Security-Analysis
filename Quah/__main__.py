@@ -55,6 +55,10 @@ def main():
     features_pct_change = args.features_pct_change
     prev_return = args.prev_return
     features_to_normalize = args.features_to_normalize
+    scale = args.scale
+    combine_stock_data = args.combine_stock_data
+    stocks_pct_change_csv_path = args.stocks_pct_change_csv_path
+    max_num_stocks_buy = args.max_num_stocks_buy
 
     file_paths: list[Path] = []
     for file_path in data_folder.iterdir():
@@ -83,28 +87,70 @@ def main():
             stocks_df.to_csv(stocks_csv_path, index=False)
         else:
             # better name for this file, incorporate date
-            name = f"./Quah/data/stocks_feat{len(features)}_{len(tickers)}_{timestamp_str}.csv"
+            name = f"./Quah/data/stocks_feat{len(features)}_{len(tickers)}_{features_pct_change}_{timestamp_str}.csv"
             stocks_df.to_csv(name, index=False)
         if prices_csv_path:
             prices_df.to_csv(prices_csv_path, index=False)
         else:
             # better name for this file, incorporate date
-            name = f"./Quah/data/prices_feat{len(features)}_{len(tickers)}_{timestamp_str}.csv"
+            name = f"./Quah/data/prices_feat{len(features)}_{len(tickers)}_{features_pct_change}_{timestamp_str}.csv"
             prices_df.to_csv(name, index=False)
     else:
-        stocks_df = pd.read_csv(stocks_csv_path)
-        prices_df = pd.read_csv(prices_csv_path)
+        if combine_stock_data:
+            normal_stocks_data = pd.read_csv(stocks_csv_path)
+            prices_df = pd.read_csv(prices_csv_path)
 
-        # replace all the `/` in the column names with `Per` to avoid issues with the file names
-        stocks_df.columns = [col.replace('/', 'Per') for col in stocks_df.columns]
-        prices_df.columns = [col.replace('/', 'Per') for col in prices_df.columns]
+            # replace all the `/` in the column names with `Per` to avoid issues with the file names
+            normal_stocks_data.columns = [col.replace('/', 'Per') for col in normal_stocks_data.columns]
+            prices_df.columns = [col.replace('/', 'Per') for col in prices_df.columns]
+
+            pct_change_stocks_data = pd.read_csv(stocks_pct_change_csv_path)
+            # the features for the pct_change_stocks_data should be the same as the normal_stocks_data
+            # we need to append `Change` to the end of each feature name
+            pct_change_stocks_features = [f'{feature.replace('/', 'Per')} Change' for feature in features]
+            # rename the current features columns of the pct_change_stocks_data
+            # create a mapping of the current features to the new features
+            feature_mapping = {feature.replace('/', 'Per'): f'{feature.replace('/', 'Per')} Change' for feature in features}
+            pct_change_stocks_data = pct_change_stocks_data.rename(columns=feature_mapping)
+
+            # Group the pct_change_stocks_data by the Ticker column
+            pct_change_stocks_data_grouped = pct_change_stocks_data.groupby('Ticker')
+
+            # Reorder the groups by the Ticker column to match the normal_stocks_data
+            pct_change_stocks_data_ordered = pd.concat(
+                [pct_change_stocks_data_grouped.get_group(ticker) for ticker in normal_stocks_data['Ticker'].unique()]
+            ).reset_index(drop=True)
+
+            # drop the Ticker, Close, Return columns from the pct_change_stocks_data_ordered
+            pct_change_stocks_data_ordered = pct_change_stocks_data_ordered.drop(columns=['Ticker', 'Close', 'Return'])
+
+        else:
+            stocks_df = pd.read_csv(stocks_csv_path)
+            prices_df = pd.read_csv(prices_csv_path)
+
+            # replace all the `/` in the column names with `Per` to avoid issues with the file names
+            stocks_df.columns = [col.replace('/', 'Per') for col in stocks_df.columns]
+            prices_df.columns = [col.replace('/', 'Per') for col in prices_df.columns]
 
         features = [feature.replace('/', 'Per') for feature in features]
         features_to_normalize = [feature.replace('/', 'Per') for feature in features_to_normalize]
 
-    if features_to_normalize:
+    # Concat columns from the pct_change_stocks_data_ordered to the normal_stocks_data
+    if combine_stock_data:
+        stocks_df = pd.concat([normal_stocks_data, pct_change_stocks_data_ordered], axis=1)
+        features = features + pct_change_stocks_features
+
+    if features_to_normalize and not features_pct_change:
+        # which of the features to normalize occur multiple times in stocks_df's columns?
+        duplicate_features = [feature for feature in features_to_normalize
+                              if (stocks_df.columns == feature).sum() > 1]
+
+        if duplicate_features:
+            raise ValueError(f"The following features occur multiple times in stocks_df: {duplicate_features}")
+
         stocks_df.loc[:, features_to_normalize] = stocks_df.loc[:, features_to_normalize].div(
             stocks_df['Shares Outstanding (Basic)'], axis=0)
+    if 'Shares Outstanding (Basic)' in features:
         features.remove('Shares Outstanding (Basic)')   # remove the Shares Outstanding (Basic) from the features list
 
     # drop invalid ticker rows
@@ -164,15 +210,22 @@ def main():
     print(f"{len(train_tickers['Ticker'].unique())} Tickers: {train_tickers['Ticker'].unique()}")
 
     # scale the data
-    from sklearn.preprocessing import StandardScaler
-    # For training data
-    scaler = StandardScaler()
-    X_train_standardized = scaler.fit_transform(X_train)
+    if scale:
+        print('Scaling the data')
+        from sklearn.preprocessing import StandardScaler
+        # For training data
+        scaler = StandardScaler()
+        X_train_standardized = scaler.fit_transform(X_train)
 
-    X_val_standardized = scaler.transform(X_val)
+        X_val_standardized = scaler.transform(X_val)
 
-    # For test data
-    X_test_standardized = scaler.transform(X_test)
+        # For test data
+        X_test_standardized = scaler.transform(X_test)
+    else:
+        print('Not scaling the data')
+        X_train_standardized = X_train
+        X_val_standardized = X_val
+        X_test_standardized = X_test
 
     bins: list[Union[float, int]] = args.bins
     Y_train_binned = np.digitize(Y_train, bins)
@@ -259,7 +312,7 @@ def main():
                       f"in{input_size}_hid{hidden_size}_out{output_size}_"
                       f"batch{batch_size}_lr{optimizer.param_groups[0]['lr']}_"
                       f"bins{''.join(map(str, bins)).replace(".", "p")}_"
-                      f"{timestamp_str}")
+                      f"scale{scale}_{timestamp_str}")
         # model output path
         model_output_path = model_folder / f'{model_name}.pth'
         train_losses, test_losses = batch_gd(model, criterion, optimizer,
@@ -579,7 +632,9 @@ def main():
                                                           cash_balance=100_000,
                                                           num_months_period=3,
                                                           apply_screening=apply_screening,
-                                                          screening_criteria=criteria)
+                                                          screening_criteria=criteria,
+                                                          max_num_stocks_buy=max_num_stocks_buy,
+                                                          output_folder=model_figures_folder / 'Predictions',)
 
         # Log the effective annual return, total return and cash balance
         total_return = cumulative_returns[-1]
