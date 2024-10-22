@@ -59,6 +59,7 @@ def main():
     combine_stock_data = args.combine_stock_data
     stocks_pct_change_csv_path = args.stocks_pct_change_csv_path
     max_num_stocks_buy = args.max_num_stocks_buy
+    min_num_quarters = args.min_num_quarters
 
     file_paths: list[Path] = []
     for file_path in data_folder.iterdir():
@@ -74,6 +75,7 @@ def main():
                                                   features=features,
                                                   features_pct_change=features_pct_change,
                                                   prev_return=prev_return,
+                                                  min_num_quarters=min_num_quarters,
                                                   )
 
         # replace all the `/` in the column names with `Per` to avoid issues with the file names
@@ -83,17 +85,19 @@ def main():
         features = [feature.replace('/', 'Per') for feature in features]
         features_to_normalize = [feature.replace('/', 'Per') for feature in features_to_normalize]
 
+        tickers = stocks_df['Ticker'].unique().tolist()
+
         if stocks_csv_path:
             stocks_df.to_csv(stocks_csv_path, index=False)
         else:
             # better name for this file, incorporate date
-            name = f"./Quah/data/stocks_feat{len(features)}_{len(tickers)}_{features_pct_change}_{timestamp_str}.csv"
+            name = f"./Quah/data/stocks_feat{len(features)}_{len(tickers)}_{features_pct_change}_{min_num_quarters}_{timestamp_str}.csv"
             stocks_df.to_csv(name, index=False)
         if prices_csv_path:
             prices_df.to_csv(prices_csv_path, index=False)
         else:
             # better name for this file, incorporate date
-            name = f"./Quah/data/prices_feat{len(features)}_{len(tickers)}_{features_pct_change}_{timestamp_str}.csv"
+            name = f"./Quah/data/prices_feat{len(features)}_{len(tickers)}_{features_pct_change}_{min_num_quarters}_{timestamp_str}.csv"
             prices_df.to_csv(name, index=False)
     else:
         if combine_stock_data:
@@ -607,17 +611,28 @@ def main():
         #     ('Total Current Assets', lambda x: x >= 100),
         #     ('Book Value Per Share', lambda x: x > 10)
         # ],
+        # [
+        #     ('Profit Margin', lambda x: x > 0),
+        #     ('PE Ratio', lambda x: 0 < x),
+        #     ('PE Ratio', lambda x: x < 15),
+        #     ('PB Ratio', lambda x: 0 < x),
+        #     ('PB Ratio', lambda x: x < 2),
+        #     ('Current Ratio', lambda x: x > 1),
+        #     ('EPS (Basic)', lambda x: x > 0),
+        #     ('Total Current Assets', lambda x: x >= 100),
+        #     ('Book Value Per Share', lambda x: x > 10)
+        # ],
         [
-            ('Profit Margin', lambda x: x > 0),
+            ('Profit Margin', lambda x: x > 0.05),
             ('PE Ratio', lambda x: 0 < x),
-            ('PE Ratio', lambda x: x < 15),
+            ('PE Ratio', lambda x: x < 20),
             ('PB Ratio', lambda x: 0 < x),
-            ('PB Ratio', lambda x: x < 2),
+            ('PB Ratio', lambda x: x < 2.5),
             ('Current Ratio', lambda x: x > 1),
             ('EPS (Basic)', lambda x: x > 0),
-            ('Total Current Assets', lambda x: x >= 100),
-            ('Book Value Per Share', lambda x: x > 10)
-        ],
+            ('Total Current Assets', lambda x: x > 0),
+            ('Book Value Per Share', lambda x: x > 0)
+        ]
     ]
     apply_screening = False
     for i, criteria in enumerate(criterias):
@@ -634,7 +649,8 @@ def main():
                                                           apply_screening=apply_screening,
                                                           screening_criteria=criteria,
                                                           max_num_stocks_buy=max_num_stocks_buy,
-                                                          output_folder=model_figures_folder / 'Predictions',)
+                                                          output_folder=model_figures_folder / 'Predictions',
+                                                          scaled=scale,)
 
         # Log the effective annual return, total return and cash balance
         total_return = cumulative_returns[-1]
@@ -655,7 +671,7 @@ def main():
         benchmark_returns: dict[str, np.ndarray] = modelVsBenchmark(
             prices_df,
             cumulative_returns,
-            benchmark_tickers=['VOOG', 'SPY', 'OEF'],
+            benchmark_tickers=['SPY', 'OEF'],   # 'VOOG', only after 2010
             start_date=None,
             end_date=None,
             save_path=benchmark_path,

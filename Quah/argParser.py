@@ -63,4 +63,6 @@ def get_args():
     parser.add_argument("--scale", action="store_true", help="Scale the data using MinMaxScaler")
     parser.add_argument("--max_num_stocks_buy", type=int, default=10,
                         help="Maximum number of stocks to buy each quarter.")
+    parser.add_argument("--min_num_quarters", type=int, default=40,
+                        help="Minimum number of quarters to hold a stock.")
     return parser.parse_args()
