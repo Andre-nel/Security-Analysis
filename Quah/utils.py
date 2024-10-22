@@ -79,7 +79,8 @@ def fetch_yahoo_finance_data(ticker: str, start_date: str, end_date: str) -> pd.
 
 
 def process_stock_file(file_path: Union[str, Path], features: list[str],
-                       features_pct_change: bool = False, prev_return: bool = False) -> pd.DataFrame:
+                       features_pct_change: bool = False, prev_return: bool = False,
+                       min_num_quarters: int = 40) -> pd.DataFrame:
     """Process an individual stock file and merge its financial data with Yahoo Finance stock prices.
 
     Args:
@@ -92,7 +93,7 @@ def process_stock_file(file_path: Union[str, Path], features: list[str],
         pd.DataFrame: DataFrame containing merged stock data and prices.
     """
     stock_df = load_and_clean_excel(file_path)
-    if len(stock_df) < 40:
+    if len(stock_df) < min_num_quarters:
         raise ValueError(f'Insufficient data: len: {len(stock_df)} for {file_path.stem}')
     ticker = file_path.stem.split('-')[0].upper()
 
@@ -141,7 +142,8 @@ def process_stock_file(file_path: Union[str, Path], features: list[str],
 
 def process_all_stocks(file_paths: list[Union[str, Path]], features: list[str],
                        features_pct_change: bool = False, prev_return: bool = False,
-                       num_stocks: int = 10_000) -> tuple[pd.DataFrame, pd.DataFrame]:
+                       num_stocks: int = 10_000,
+                       min_num_quarters: int = 40) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Process multiple stock files and return a concatenated DataFrame with all data.
 
     Args:
@@ -171,7 +173,8 @@ def process_all_stocks(file_paths: list[Union[str, Path]], features: list[str],
         future_to_file = {
             executor.submit(process_stock_file, file_path, features,
                             features_pct_change=features_pct_change,
-                            prev_return=prev_return): file_path
+                            prev_return=prev_return,
+                            min_num_quarters=min_num_quarters): file_path
             for file_path in file_paths[:num_stocks]
         }
         for future in as_completed(future_to_file):
@@ -481,7 +484,8 @@ def simulateModelsTradingStrategy(model: nn.Module,
                                   apply_screening: bool = True,
                                   screening_criteria: dict = None,
                                   max_num_stocks_buy: int = 10,
-                                  output_folder: Union[str, Path] = 'figures') -> tuple:
+                                  output_folder: Union[str, Path] = 'figures',
+                                  scaled: bool = True) -> tuple:
     """
     Tests a trading strategy using a given model on provided quarterly data, and saves plots of predicted probabilities 
     vs actual returns for each quarter.
@@ -498,6 +502,7 @@ def simulateModelsTradingStrategy(model: nn.Module,
         screening_criteria (list[tuple[str, function]]): Custom screening criteria provided by the user.
         max_num_stocks_buy (int): Maximum number of stocks to buy.
         output_folder (Union[str, Path]): Folder to save output plots.
+        scaled (bool): Whether the data was scaled.
 
     Returns:
         tuple: Periodic returns, cumulative returns, and final cash balance.
@@ -519,12 +524,20 @@ def simulateModelsTradingStrategy(model: nn.Module,
             ('Total Current Assets', lambda x: x > 0),
             ('Book Value Per Share', lambda x: x > 0)
         ]
-    elif not screening_criteria or screening_criteria is None or not apply_screening:
+    elif not screening_criteria or screening_criteria is None:
         screening_criteria = []
 
     portfolio = {}  # {ticker: shares}
     periodic_returns = []  # returns for each period
     cumulative_returns = []  # cumulative returns
+
+    # screen the stocks periodic returns
+    screened_stocks_returns = []
+    all_stocks_returns = []
+
+    # screen the stocks cumulative returns
+    screened_stocks_cumulative_returns = []
+    all_stocks_cumulative_returns = []
 
     # Ensure the model is in evaluation mode
     model.eval()
@@ -550,7 +563,7 @@ def simulateModelsTradingStrategy(model: nn.Module,
                 cash_balance += sale_value
             portfolio = {}  # Reset portfolio
 
-        # Use the model to predict classes for each stock
+        # Plot predicted probabilities vs actual returns
         with torch.no_grad():
             outputs = model(X_test_q)
 
@@ -561,15 +574,57 @@ def simulateModelsTradingStrategy(model: nn.Module,
             actual_returns = (prices_q['Close'].values - prices_q['Open'].values) / prices_q['Open'].values
             tickers = prices_q['Ticker'].values
 
+            # Apply screening criteria to identify stocks that pass screening
+            screened_stocks = prices_q.copy()
+            if not scaled and screening_criteria:
+                for column, condition in screening_criteria:
+                    screened_stocks = screened_stocks[condition(screened_stocks[column])]
+
+            # Extract the tickers of screened stocks
+            screened_tickers = screened_stocks['Ticker'].values
+
             # Plot predicted probabilities vs actual returns
             plt.figure(figsize=(10, 6))
             prob_values = probabilities[:, -1].cpu().numpy()
 
-            # Normalize the returns for the color mapping (using a color scale from red to green)
-            colors = np.where(actual_returns > 0, actual_returns, -actual_returns)  # Absolute returns for intensity
             cmap = plt.get_cmap('RdYlGn')  # Red for negative, green for positive
 
             scatter = plt.scatter(prob_values, actual_returns, c=actual_returns, cmap=cmap, alpha=0.6)
+
+            # Add a second scatter plot for screened stocks (with different markers)
+            screened_indices = [i for i, ticker in enumerate(tickers) if ticker in screened_tickers]
+            # unscreened_indices = [i for i in range(len(tickers)) if i not in screened_indices]
+
+            # Highlight screened stocks with a different marker
+            if not scaled:
+                plt.scatter(prob_values[screened_indices], actual_returns[screened_indices],
+                            edgecolor='blue', facecolor='none', s=50, marker='o', label="Screened Stocks")
+                
+                # print the screened stocks
+                print(f"Screened Stocks: {screened_tickers}")
+                # print the average return of the screened stocks
+                period_avg_return_screened = np.mean(actual_returns[screened_indices])
+
+                print(f"Average Return of Screened Stocks: {period_avg_return_screened}")
+                print(f"Average Return of All Stocks: {np.mean(actual_returns)}")
+
+                screened_stocks_returns.append(period_avg_return_screened)
+                all_stocks_returns.append(np.mean(actual_returns))
+
+                # screened_stocks_cumulative_returns
+                if screened_stocks_cumulative_returns:
+                    screened_stocks_cumulative_return = (1 + screened_stocks_cumulative_returns[-1]) * (1 + period_avg_return_screened) - 1
+                else:
+                    screened_stocks_cumulative_return = period_avg_return_screened
+                screened_stocks_cumulative_returns.append(screened_stocks_cumulative_return)
+
+                # all_stocks_cumulative_returns
+                if all_stocks_cumulative_returns:
+                    all_stocks_cumulative_return = (1 + all_stocks_cumulative_returns[-1]) * (1 + np.mean(actual_returns)) - 1
+                else:
+                    all_stocks_cumulative_return = np.mean(actual_returns)
+                all_stocks_cumulative_returns.append(all_stocks_cumulative_return)
+
             # draw a horizontal line at 0
             plt.axhline(0, color='red', linestyle='--', linewidth=0.5)
             # draw a vertical line at the probability threshold, ie the probability
@@ -579,7 +634,7 @@ def simulateModelsTradingStrategy(model: nn.Module,
             # the probability of the max_num_stocks_buy th stock
             cut_of_prob = sorted_prob_values[-max_num_stocks_buy]
             plt.axvline(cut_of_prob, color='blue', linestyle='--', linewidth=0.5)
-            
+
             plt.title(f'Predicted Probabilities vs Actual Returns, Period {period + 1}: {period_start_date} - {period_end_date.date().strftime('%Y-%m-%d')}')
             plt.xlabel('Predicted Probability of Highest Return Class')
             plt.ylabel('Actual Return')
@@ -595,6 +650,7 @@ def simulateModelsTradingStrategy(model: nn.Module,
             plt.savefig(plot_filename)
             plt.close()
             print(f"Plot for Period {period + 1} saved to {plot_filename}")
+
         # Use the model to predict classes for each stock
         with torch.no_grad():
             outputs = model(X_test_q)
@@ -630,13 +686,11 @@ def simulateModelsTradingStrategy(model: nn.Module,
             # print(f"Model selected: {num_to_be_screened} Stocks selected for screening: ", to_be_screened_tickers)
             print(f"Model selected: {num_to_be_screened} Stocks selected for screening")
 
-            # Apply screening criteria
-            for column, condition in screening_criteria:
-                selected_stocks = selected_stocks[condition(selected_stocks[column])]
-
             # Get tickers of passed and failed stocks
             if apply_screening:
-                pass
+                # Apply screening criteria
+                for column, condition in screening_criteria:
+                    selected_stocks = selected_stocks[condition(selected_stocks[column])]
                 passed_tickers = selected_stocks['Ticker'].tolist()
                 print(f"{len(passed_tickers)} Stocks passed the screening: ", passed_tickers)
             else:
@@ -651,7 +705,7 @@ def simulateModelsTradingStrategy(model: nn.Module,
                 date_str = prices_q['Date'].iloc[0]
                 print(f"Buying {num_stocks} stocks that passed the screening on {date_str}...")
                 print(f'Stocks: {selected_stocks["Ticker"].tolist()}')
-                
+
                 # raise exception if a ticker occurs more than one in the selected_stocks
                 if len(selected_stocks['Ticker'].unique()) != len(selected_stocks):
                     raise ValueError("A ticker occurs more than once in the selected_stocks")
@@ -699,6 +753,28 @@ def simulateModelsTradingStrategy(model: nn.Module,
 
         # Reset portfolio for the next period
         portfolio = {}
+
+    # plot the screened stocks cumulative returns
+    # plot the all stocks cumulative returns
+    plt.figure(figsize=(10, 6))
+    plt.plot(screened_stocks_cumulative_returns, label='Screened Stocks Cumulative Returns')
+    plt.plot(all_stocks_cumulative_returns, label='All Stocks Cumulative Returns')
+    plt.title('Screened Stocks vs All Stocks Cumulative Returns')
+    plt.xlabel('Period')
+    plt.ylabel('Cumulative Returns')
+    plt.legend()
+    plt.grid(True)
+    plt.savefig(output_folder / 'screened_vs_all_cumulative_returns.png')
+    plt.close()
+
+    # effective annual return of the screened stocks
+
+    # total return of the screened stocks
+
+    # effective annual return of all stocks
+
+    # total return of all stocks
+
 
     return periodic_returns, cumulative_returns, cash_balance
 
