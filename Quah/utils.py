@@ -539,6 +539,8 @@ def simulateModelsTradingStrategy(model: nn.Module,
     screened_stocks_cumulative_returns = []
     all_stocks_cumulative_returns = []
 
+    commission_fee = 0.000 # 0.003 # 0.3% commission fee
+
     # Ensure the model is in evaluation mode
     model.eval()
 
@@ -553,15 +555,7 @@ def simulateModelsTradingStrategy(model: nn.Module,
         period_end_date = pd.Timestamp(period_start_date) + pd.DateOffset(months=num_months_period)
         print(f"\n--- Period {period + 1}: {period_start_date} - {period_end_date.date().strftime('%Y-%m-%d')} ---")
 
-        # Sell all holdings at the beginning of the period
-        if portfolio:
-            print("Selling all holdings from previous period...")
-            for stock, num_shares in portfolio.items():
-                # Get the opening price of the stock in the current period
-                opening_price = prices_q.loc[prices_q['Ticker'] == stock, 'Open'].values[0]
-                sale_value = num_shares * opening_price
-                cash_balance += sale_value
-            portfolio = {}  # Reset portfolio
+        # Portfolio Reset at the end of each period, sell at the end of the previous period
 
         # Plot predicted probabilities vs actual returns
         with torch.no_grad():
@@ -599,7 +593,7 @@ def simulateModelsTradingStrategy(model: nn.Module,
             if not scaled:
                 plt.scatter(prob_values[screened_indices], actual_returns[screened_indices],
                             edgecolor='blue', facecolor='none', s=50, marker='o', label="Screened Stocks")
-                
+
                 # print the screened stocks
                 print(f"Screened Stocks: {screened_tickers}")
                 # print the average return of the screened stocks
@@ -701,7 +695,10 @@ def simulateModelsTradingStrategy(model: nn.Module,
             if num_stocks == 0:
                 print("No stocks passed the screening criteria. Holding cash this period.")
             else:
-                investment_per_stock = cash_balance / num_stocks
+                # Adjust for commission when buying
+                investment_per_stock = cash_balance / num_stocks * (1 - commission_fee)
+                commission_buy = cash_balance / num_stocks * commission_fee
+                total_cost_per_stock = investment_per_stock + commission_buy
                 date_str = prices_q['Date'].iloc[0]
                 print(f"Buying {num_stocks} stocks that passed the screening on {date_str}...")
                 print(f'Stocks: {selected_stocks["Ticker"].tolist()}')
@@ -713,9 +710,16 @@ def simulateModelsTradingStrategy(model: nn.Module,
                     ticker = stock['Ticker']
                     opening_price = stock['Open']
                     num_shares = investment_per_stock / opening_price
-                    portfolio[ticker] = num_shares
+                    # Store cost basis including commission
+                    portfolio[ticker] = {
+                        'num_shares': num_shares,
+                        'cost_basis': total_cost_per_stock
+                    }
 
-                cash_balance = 0  # All cash invested
+                # cash_balance = 0  # All cash invested
+                # Update cash balance after buying stocks and paying commissions
+                cash_balance -= num_stocks * total_cost_per_stock
+                assert np.isclose(cash_balance, 0, atol=1e-6)
 
         # At the end of the period, sell all stocks at closing price
         period_return = 0
@@ -724,20 +728,37 @@ def simulateModelsTradingStrategy(model: nn.Module,
 
         if portfolio:
             print("Selling all holdings at the end of the period...")
-            for stock, num_shares in portfolio.items():
-                opening_price = prices_q.loc[prices_q['Ticker'] == stock, 'Open'].values[0]
+            for stock, data in portfolio.items():
+                num_shares = data['num_shares']
+                cost_basis = data['cost_basis']
                 closing_price = prices_q.loc[prices_q['Ticker'] == stock, 'Close'].values[0]
-                investment = num_shares * opening_price
                 sale_value = num_shares * closing_price
-                profit = sale_value - investment
-                total_investment += investment
-                total_value += sale_value
-                period_return += profit / investment  # Return per stock
 
-            # Average return per stock
-            period_return = period_return / len(portfolio)
+                # Commission on sale
+                commission_sell = commission_fee * sale_value
+                net_sale_proceeds = sale_value - commission_sell
+
+                # Profit before tax
+                profit = net_sale_proceeds - cost_basis
+
+                # Tax on profit (45% of profit if profit > 0)
+                tax_rate = 0.2
+                tax = tax_rate * profit if profit > 0 else 0
+
+                # Net proceeds after tax
+                net_proceeds_after_tax = net_sale_proceeds - tax
+
+                total_investment += cost_basis
+                total_value += net_proceeds_after_tax
+
+            # Calculate period return
+            period_return = (total_value - total_investment) / total_investment
+
             # Update cash balance
             cash_balance += total_value
+
+            # Reset portfolio for the next period
+            portfolio = {}
         else:
             period_return = 0  # No investments made
 
@@ -750,9 +771,6 @@ def simulateModelsTradingStrategy(model: nn.Module,
         else:
             cumulative_return = period_return
         cumulative_returns.append(cumulative_return)
-
-        # Reset portfolio for the next period
-        portfolio = {}
 
     # plot the screened stocks cumulative returns
     # plot the all stocks cumulative returns
